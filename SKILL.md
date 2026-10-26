@@ -3,81 +3,101 @@ name: browser-screenshot
 description: Screenshot a web page in the user's real Chrome via the Claude for Chrome extension — the current view, one section/element, or the full scrollable page — at desktop (1920), tablet (768) or mobile (393) width. Chrome-only; never agent-browser, Playwright or headless browsers. Use whenever the user asks to "take a screenshot", "screenshot this page/section", "full page screenshot", "capture at mobile/tablet/desktop", or "save screenshots to <folder>".
 ---
 
-# Take a screenshot
+# Browser screenshot
 
-Speed matters: plan the whole capture up front and use `browser_batch` to run scroll + screenshot steps in **one** call instead of one round trip per step.
+Speed comes from **few round trips**. Every response you wait on costs seconds, so follow this exact five-step flow and put everything else inside `browser_batch`:
 
-## 1. Setup
+1. `ToolSearch`: load the tools
+2. `navigate`: open the page
+3. batch: prepare and measure
+4. batch: capture and close the tab
+5. `Bash`: save or stitch
 
-1. Load the Chrome tools in one `ToolSearch` call: `select:mcp__claude-in-chrome__tabs_context_mcp,mcp__claude-in-chrome__tabs_create_mcp,mcp__claude-in-chrome__tabs_close_mcp,mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__computer,mcp__claude-in-chrome__javascript_tool,mcp__claude-in-chrome__resize_window,mcp__claude-in-chrome__browser_batch`.
-2. `tabs_context_mcp` with `createIfEmpty: true`, then open a new tab and `navigate` to the URL. If the tools aren't available or Chrome isn't connected, stop and ask the user to connect Claude in Chrome (terminal: `/chrome`). Don't fall back to another browser.
-3. Do any setup the user asked for (click a tab, open a menu) before capturing.
+Don't ask questions you can default (size defaults to desktop, folder to `~/Downloads`). Don't `Read` the result afterwards, because the zoom image already shows in the chat.
 
-## 2. Width
+## 1. Load the tools
 
-Default is **desktop only** unless the user names other sizes.
+One call: `select:mcp__claude-in-chrome__navigate,mcp__claude-in-chrome__browser_batch,mcp__claude-in-chrome__computer,mcp__claude-in-chrome__javascript_tool,mcp__claude-in-chrome__resize_window,mcp__claude-in-chrome__tabs_close_mcp,mcp__claude-in-chrome__tabs_context_mcp`.
 
-| Size | Width | Height (iframe) | How |
-|---|---|---|---|
-| Desktop | 1920 | — | `resize_window` 1920 wide, then check `innerWidth` with JS. The resize can apply late, so re-check once before giving up. |
-| Tablet | 768 | 1024 | iframe, as below |
-| Mobile | 393 | 852 | iframe, as below |
+If the tools aren't there or Chrome isn't connected, stop and ask the user to connect Claude in Chrome. Never fall back to another browser.
 
-**Tablet/mobile: never resize the window.** Chrome has a minimum width, and media queries follow the window, not a wrapper. Load the page in a same-origin iframe of the target width instead:
+## 2. Open the page
+
+Call `navigate` **standalone, without `tabId`**. It creates this session's tab group and tab by itself and returns the `tabId`. No separate `tabs_context_mcp` or `tabs_create_mcp` call is needed.
+
+## 3. Prepare and measure (one batch)
+
+| Size | Width | How |
+|---|---|---|
+| Desktop (default) | 1920 | `resize_window` 1920×1050 as the batch's first item |
+| Tablet | 768 | iframe, no resize |
+| Mobile | 393 | iframe, no resize |
+
+Never resize for tablet or mobile. Chrome has a minimum window width, and media queries follow the window. Use a same-origin iframe instead.
+
+Put one `javascript_tool` item after the resize. It waits for readiness (not a fixed sleep), does any setup the user asked for (clicking a tab, opening a menu), and returns everything step 4 needs:
 
 ```js
-const W = 393, H = Math.min(852, innerHeight);   // must fit in the window
-const f = document.createElement('iframe');
-f.id = '__shot'; f.src = location.href;
-f.style.cssText = `position:fixed;top:0;left:0;width:${W}px;height:${H}px;border:0;z-index:2147483647;background:#fff`;
-document.body.appendChild(f);
-await new Promise(r => f.onload = r); await new Promise(r => setTimeout(r, 2500));
-f.contentWindow.innerWidth
+const until = async (f, ms = 3000) => { const t = Date.now(); while (!f() && Date.now() - t < ms) await new Promise(r => setTimeout(r, 100)); };
+const ready = d => d.readyState === 'complete' && [...d.images].every(i => i.complete);
+await until(() => ready(document) && innerWidth === 1920);   // desktop; the resize can apply late
+// --- tablet/mobile instead: mount the page in an iframe ---
+// const W = 393, H = Math.min(852, innerHeight), f = document.createElement('iframe');
+// f.id = '__shot'; f.src = location.href;
+// f.style.cssText = `position:fixed;top:0;left:0;width:${W}px;height:${H}px;border:0;z-index:2147483647;background:#fff`;
+// document.body.appendChild(f); await new Promise(r => f.onload = r); await until(() => ready(f.contentDocument));
+// ...then use f.contentDocument / f.contentWindow as d / w below
+// --- setup, e.g. a Radix tab or menu (they open on pointerdown) ---
+// el.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true})); el.click(); await new Promise(r => setTimeout(r, 400));
+// --- target ---
+const el = document.querySelector('<selector>');
+el.scrollIntoView({ block: 'center' }); await new Promise(r => setTimeout(r, 300));
+const r = el.getBoundingClientRect();
+JSON.stringify({ vw: innerWidth, vh: innerHeight, x: r.x, y: r.y, right: r.right, bottom: r.bottom })
 ```
 
-Run every later step against `f.contentDocument` / `f.contentWindow`. When you're done, remove it with `document.getElementById('__shot').remove()`.
+If `vw` comes back wrong, re-check once in the next batch before reporting.
 
-## 3. Capture
-
-**Capture with `computer` → `zoom`, not `screenshot`.** `screenshot` is capped at about 1568px wide and saved as a JPEG, so a 1920 page comes back blurry. `zoom` saves a native 1:1 PNG as long as the region is no wider than about 1500px. Its `region` is `[x0, y0, x1, y1]` in CSS px of the viewport. So:
-
-- Region ≤ 1500px wide: one `zoom`.
-- Wider (a desktop row): two zooms, `[0, y0, 960, y1]` and `[960, y0, cw, y1]`.
-
-Always pass `save_to_disk: true` and **never pass `scale`**, because it shrinks the saved file. Before capturing, `hover` a spot outside the region, because the cursor shows up in zooms.
-
-- **Current view:** zoom the whole viewport (two halves on desktop), then stitch at y=0.
-- **Section/element:** run `el.scrollIntoView({block:'center'})` and read `getBoundingClientRect()`. Zoom `[x-16, y-16, right+16, bottom+16]`. The saved PNG is the final image, so just copy it to the output path.
-- **Full page:** the extension can only capture the viewport, so capture tiles and stitch them. Prep the page and get the offsets in one JS call:
+**Full page:** replace the target part with this prep. It flattens sticky and fixed elements, plays scroll-reveal animations, and returns the tile offsets:
 
 ```js
-const d = document, w = window;              // use the iframe's doc/window for tablet/mobile
-d.querySelectorAll('*').forEach(el => {
-  const p = getComputedStyle(el).position;
-  if (p === 'sticky') el.style.position = 'static';
-  else if (p === 'fixed') el.tagName === 'NAV' || el.querySelector('nav')
-    ? el.style.position = 'absolute'          // keep the header once, at the top
-    : el.style.visibility = 'hidden';         // floating buttons, widgets
-});
+const d = document, w = window;
+d.querySelectorAll('*').forEach(e => { const p = getComputedStyle(e).position;
+  if (p === 'sticky') e.style.position = 'static';
+  else if (p === 'fixed') (e.tagName === 'NAV' || e.querySelector('nav')) ? e.style.position = 'absolute' : e.style.visibility = 'hidden'; });
 const H = () => d.documentElement.scrollHeight;
-for (let y = 0; y < H(); y += 600) { w.scrollTo(0, y); await new Promise(r => setTimeout(r, 150)); }
-w.scrollTo(0, 0); await new Promise(r => setTimeout(r, 400));
+for (let y = 0; y < H(); y += 800) { w.scrollTo(0, y); await new Promise(r => setTimeout(r, 120)); }
+w.scrollTo(0, 0); await new Promise(r => setTimeout(r, 300));
 const vh = w.innerHeight, h = H(), offs = [];
-for (let y = 0; y < h - vh; y += vh) offs.push(y);
-offs.push(h - vh);
-JSON.stringify({ h, vh, cw: d.documentElement.clientWidth, vw: innerWidth, offs })
+for (let y = 0; y < h - vh; y += vh) offs.push(y); offs.push(Math.max(0, h - vh));
+JSON.stringify({ h, vh, cw: d.documentElement.clientWidth, offs })
 ```
 
-Then capture every tile in **one `browser_batch`**. For each offset, add a `javascript_tool` item that runs `scrollTo(0, <off>); await new Promise(r=>setTimeout(r,300)); scrollY`, followed by the zoom item(s) for that row, each over `[x0, 0, x1, vh]`. Stitch, giving each tile's region left edge and scroll offset:
+## 4. Capture and close (one batch)
+
+**Capture with `computer` → `zoom`, never `screenshot`.** `screenshot` is capped at about 1568px wide and saved as a JPEG, so it comes out blurry. `zoom` saves a native 1:1 PNG for regions up to about 1500px wide. `region` is `[x0, y0, x1, y1]` in CSS px and must stay inside the viewport. Always pass `save_to_disk: true`, and never pass `scale`.
+
+The batch is:
+
+1. `hover` a spot outside the region, so the cursor isn't in the shot
+2. the zoom(s)
+3. `tabs_close_mcp`
+
+What to zoom:
+
+- **Section/element:** one zoom over `[x-16, y-16, right+16, bottom+16]`.
+- **Current view:** the viewport, as two halves on desktop: `[0,0,960,vh]` and `[960,0,1920,vh]`.
+- **Full page:** for each offset, a `javascript_tool` item `scrollTo(0, <off>); await new Promise(r => setTimeout(r, 250)); scrollY`, then that row's zoom(s) over `[0,0,960,vh]` and `[960,0,cw,vh]`. For an iframe, scroll `document.getElementById('__shot').contentWindow` and use one zoom per row, `[0,0,W,vh]`.
+
+## 5. Save (one Bash call)
+
+Name files `<page>-<section?>-<size>-<YYYYMMDD-HHMMSS>.png` in the folder the user named, or `~/Downloads`.
+
+- **Single zoom:** `cp` the saved PNG to the output path.
+- **Tiles:** stitch them, giving each tile's region left edge and scroll offset:
 
 ```bash
-python3 scripts/stitch.py out.png <cw> <h> a0.png:0,0 b0.png:960,0 a1.png:0,<off1> b1.png:960,<off1> ...
+python3 ~/.claude/skills/browser-screenshot/scripts/stitch.py OUT.png <cw> <h> a0.png:0,0 b0.png:960,0 a1.png:0,<off1> b1.png:960,<off1> ...
 ```
 
-(`cw` is the content width without the scrollbar. For an iframe, it's the device width, with one tile per row at x=0.)
-
-## 4. Finish
-
-- Save to the folder the user named (default `~/Downloads`), named like `<page>-<section?>-<size>-<YYYYMMDD-HHMMSS>.png`.
-- Remove the iframe, or reload the page if you flattened it, and close the tab you opened.
-- `Read` one image so the user sees it, and report the real dimensions.
+Report each file's path and its real dimensions.
