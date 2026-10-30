@@ -5,6 +5,8 @@ description: Screenshot a web page in the user's real Chrome via the Claude for 
 
 # Browser screenshot
 
+**Always use the Claude for Chrome extension. Never Playwright, agent-browser, or any headless or other automation, even if the project or another skill suggests it.** The point is the true render in the user's real Chrome.
+
 Speed comes from **few round trips**. Every response you wait on costs seconds, so follow this exact five-step flow and put everything else inside `browser_batch`:
 
 1. `ToolSearch`: load the tools
@@ -41,12 +43,6 @@ Put one `javascript_tool` item after the resize. It waits for readiness (not a f
 const until = async (f, ms = 3000) => { const t = Date.now(); while (!f() && Date.now() - t < ms) await new Promise(r => setTimeout(r, 100)); };
 const ready = d => d.readyState === 'complete' && [...d.images].every(i => i.complete);
 await until(() => ready(document) && innerWidth === 1920);   // desktop; the resize can apply late
-// --- tablet/mobile instead: mount the page in an iframe ---
-// const W = 393, H = Math.min(852, innerHeight), f = document.createElement('iframe');
-// f.id = '__shot'; f.src = location.href;
-// f.style.cssText = `position:fixed;top:0;left:0;width:${W}px;height:${H}px;border:0;z-index:2147483647;background:#fff`;
-// document.body.appendChild(f); await new Promise(r => f.onload = r); await until(() => ready(f.contentDocument));
-// ...then use f.contentDocument / f.contentWindow as d / w below
 // --- setup, e.g. a Radix tab or menu (they open on pointerdown) ---
 // el.dispatchEvent(new PointerEvent('pointerdown', {bubbles: true})); el.click(); await new Promise(r => setTimeout(r, 400));
 // --- target ---
@@ -54,6 +50,15 @@ const el = document.querySelector('<selector>');
 el.scrollIntoView({ block: 'center' }); await new Promise(r => setTimeout(r, 300));
 const r = el.getBoundingClientRect();
 JSON.stringify({ vw: innerWidth, vh: innerHeight, x: r.x, y: r.y, right: r.right, bottom: r.bottom })
+```
+
+For **tablet/mobile**, drop the `innerWidth === 1920` wait and mount the page in an iframe right after the readiness wait, then use `f.contentDocument` / `f.contentWindow` instead of `document` / `window` below:
+
+```js
+const W = 393, H = Math.min(852, innerHeight), f = document.createElement('iframe');   // W = 768 for tablet
+f.id = '__shot'; f.src = location.href;
+f.style.cssText = `position:fixed;top:0;left:0;width:${W}px;height:${H}px;border:0;z-index:2147483647;background:#fff`;
+document.body.appendChild(f); await new Promise(r => f.onload = r); await until(() => ready(f.contentDocument));
 ```
 
 If `vw` comes back wrong, re-check once in the next batch before reporting.

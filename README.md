@@ -4,9 +4,6 @@ A Claude Code skill that screenshots web pages in your real Chrome through the C
 
 ## Install
 
-```bash
-git clone https://github.com/derek98765/browser-screenshot.git
-ln -s "$PWD/browser-screenshot" ~/.claude/skills/browser-screenshot
-```
+Lives in the opstack repo as a submodule at `skills/browser-screenshot`; `~/.claude/skills` points at `opstack/skills`, so there is nothing to install. To use it standalone, clone `https://github.com/derek98765/browser-screenshot.git` into `~/.claude/skills/browser-screenshot`.
 
-The scripts need Pillow (`pip3 install pillow`).
+`scripts/stitch.py` (full-page tiles) needs Pillow (`pip3 install pillow`).
